@@ -5,10 +5,13 @@
  */
 import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DataLine, Files, Grid, Odometer, PieChart } from '@element-plus/icons-vue'
+import { Compass, CollectionTag, DataLine, Files, Grid, Odometer, PieChart } from '@element-plus/icons-vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { useVisitStore } from '@/stores/visitStore'
+import { useArchiveStore } from '@/stores/archiveStore'
+import { useCanonicalStore } from '@/stores/canonicalStore'
 import { DB_NAME, DB_VERSION } from '@/utils/db'
 
 const route = useRoute()
@@ -16,15 +19,23 @@ const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
 const surveyStore = useSurveyStore()
+const visitStore = useVisitStore()
+const archiveStore = useArchiveStore()
+const canonical = useCanonicalStore()
 
 onMounted(() => {
   reefStore.start()
   beltStore.start()
   surveyStore.start()
+  visitStore.start()
+  archiveStore.start()
+  canonical.start()
 })
 
 /** 层级路由统一归属到最上层导航项 */
 const activeKey = computed(() => {
+  if (route.path.startsWith('/field')) return '/field/visits'
+  if (route.path.startsWith('/archive')) return '/archive'
   if (route.path.startsWith('/reefs/')) return '/reefs'
   if (route.path.startsWith('/sites/')) return '/reefs'
   if (route.path.startsWith('/belts/')) return '/coverage'
@@ -33,6 +44,8 @@ const activeKey = computed(() => {
 
 const navItems = computed(() => [
   { key: '/reefs', label: '礁区台账', icon: Odometer, badge: String(reefStore.reefs.length) },
+  { key: '/field/visits', label: '外业巡次', icon: Compass, badge: String(visitStore.visits.length) },
+  { key: '/archive', label: '礁区档案室', icon: CollectionTag, badge: String(archiveStore.finalizations.length) },
   { key: '/coverage', label: '覆盖度汇总', icon: PieChart, badge: String(surveyStore.corals.length) }
 ])
 
@@ -107,7 +120,8 @@ function go(path: string): void {
         本地库 {{ DB_NAME }} · 结构版本 v{{ DB_VERSION }} · 数据仅存于本浏览器 IndexedDB，不上传任何服务器。
       </span>
       <span>
-        礁区 {{ reefStore.reefs.length }} · 站位 {{ reefStore.sites.length }} · 样带 {{ beltStore.belts.length }} · 珊瑚记录
+        礁区 {{ reefStore.reefs.length }} · 站位 {{ reefStore.sites.length }} · 巡次 {{ visitStore.visits.length }}
+        · 定案 {{ archiveStore.finalizations.length }} · 样带 {{ beltStore.belts.length }} · 珊瑚记录
         {{ surveyStore.corals.length }} · 计数记录 {{ surveyStore.fishes.length }}
       </span>
     </footer>

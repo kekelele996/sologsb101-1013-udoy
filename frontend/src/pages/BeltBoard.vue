@@ -4,7 +4,7 @@
  * 录长度/朝向/调查日期并回显已录记录数；朝向排序校验，深链访问时站位不存在给出友好空态。
  * 复用 <StatBadge>、<EmptyPanel>。
  */
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Edit, Plus, Right, Warning } from '@element-plus/icons-vue'
@@ -15,8 +15,10 @@ import RouteMissingPanel from '@/components/common/RouteMissingPanel.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { ORIENTATION_ORDER, useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { useVisitStore } from '@/stores/visitStore'
 import { BELT_LENGTH_PRESETS, ORIENTATIONS } from '@/types/belt'
 import type { Belt, Orientation } from '@/types/belt'
+import { QUARTER_LABEL } from '@/types/visit'
 import { bleachGrade, bleachIndex, coralCoveragePct, fishDensity } from '@/utils/bleach'
 import { initDatabase } from '@/utils/db'
 
@@ -25,10 +27,36 @@ const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
 const surveyStore = useSurveyStore()
+const visitStore = useVisitStore()
 
 const siteId = computed(() => String(route.params.id ?? ''))
 const site = computed(() => reefStore.siteById(siteId.value))
 const reef = computed(() => (site.value ? reefStore.reefById(site.value.reefId) : null))
+
+/** 当前查看的巡次：URL ?visit= 优先，否则默认该礁区最近一次巡访；'all' 看全部 */
+const selectedVisitId = ref<string>('all')
+
+/** 本礁区可选用的巡访（年份 / 季度降序） */
+const visitOptions = computed(() => visitStore.visitsOfReef(reef.value?.id))
+
+const currentVisit = computed(() => visitStore.visitById(selectedVisitId.value === 'all' ? null : selectedVisitId.value))
+
+function syncVisitFromQuery(): void {
+  const q = typeof route.query.visit === 'string' ? route.query.visit : ''
+  if (q && visitOptions.value.some((visit) => visit.id === q)) {
+    selectedVisitId.value = q
+  } else if (visitOptions.value.length > 0) {
+    selectedVisitId.value = visitOptions.value[0].id
+  } else {
+    selectedVisitId.value = 'all'
+  }
+}
+
+function handleVisitChange(value: string): void {
+  selectedVisitId.value = value
+  if (value === 'all') void router.replace({ query: {} })
+  else void router.replace({ query: { visit: value } })
+}
 
 const dialogVisible = ref(false)
 const editingId = ref<string | null>(null)
@@ -41,9 +69,16 @@ const form = reactive({
   observer: ''
 })
 
+/** 当前巡次下的样带（重访同编号样带按巡次分开） */
+const scopedBelts = computed(() =>
+  beltStore
+    .beltsOfSite(siteId.value)
+    .filter((belt) => selectedVisitId.value === 'all' || belt.visitId === selectedVisitId.value)
+)
+
 /** 样带行：回显珊瑚记录数、鱼类记录数、覆盖率与白化指数 */
 const rows = computed(() =>
-  beltStore.beltsOfSite(siteId.value).map((belt) => {
+  scopedBelts.value.map((belt) => {
     const corals = surveyStore.coralsOfBelt(belt.id)
     const fishes = surveyStore.fishesOfBelt(belt.id)
     const coverCmTotal = corals.reduce((sum, coral) => sum + coral.coverCm, 0)
@@ -51,6 +86,7 @@ const rows = computed(() =>
     const fishTotal = fishes.filter((fish) => fish.category === '鱼类').reduce((sum, fish) => sum + fish.count, 0)
     return {
       belt,
+      visit: visitStore.visitById(belt.visitId),
       coralCount: corals.length,
       fishCount: fishes.length,
       coverCmTotal,
@@ -62,10 +98,15 @@ const rows = computed(() =>
   })
 )
 
-const conflicts = computed(() => beltStore.findBeltConflicts(siteId.value))
+const conflicts = computed(() =>
+  beltStore.findBeltConflicts(
+    siteId.value,
+    selectedVisitId.value === 'all' ? undefined : selectedVisitId.value
+  )
+)
 
 const stats = computed(() => {
-  const belts = beltStore.beltsOfSite(siteId.value)
+  const belts = scopedBelts.value
   const totalLength = belts.reduce((sum, belt) => sum + belt.lengthM, 0)
   const coralCount = belts.reduce((sum, belt) => sum + surveyStore.coralsOfBelt(belt.id).length, 0)
   const fishCount = belts.reduce((sum, belt) => sum + surveyStore.fishesOfBelt(belt.id).length, 0)
@@ -79,8 +120,7 @@ const stats = computed(() => {
 })
 
 function nextNo(): string {
-  const numbers = beltStore
-    .beltsOfSite(siteId.value)
+  const numbers = scopedBelts.value
     .map((belt) => Number(belt.no.replace(/[^0-9]/g, '')))
     .filter((value) => Number.isFinite(value))
   const next = numbers.length === 0 ? 1 : Math.max(...numbers) + 1
@@ -88,13 +128,19 @@ function nextNo(): string {
 }
 
 function openCreate(): void {
+  if (selectedVisitId.value === 'all') {
+    ElMessage.warning('请先在上方选择一次巡访，再在该次巡访下布设样带')
+    return
+  }
   editingId.value = null
-  const existing = beltStore.beltsOfSite(siteId.value)
+  const existing = scopedBelts.value
   form.no = nextNo()
   form.lengthM = existing[0]?.lengthM ?? 50
   form.orientation = ORIENTATIONS[existing.length % ORIENTATIONS.length]
-  form.surveyDate = new Date().toISOString().slice(0, 10)
-  form.observer = existing[0]?.observer ?? ''
+  form.surveyDate = currentVisit.value
+    ? `${currentVisit.value.year}-${currentVisit.value.quarter === 'Q1' ? '02' : currentVisit.value.quarter === 'Q2' ? '05' : currentVisit.value.quarter === 'Q3' ? '08' : '11'}-15`
+    : new Date().toISOString().slice(0, 10)
+  form.observer = existing[0]?.observer ?? currentVisit.value?.leader ?? ''
   dialogVisible.value = true
 }
 
@@ -121,16 +167,17 @@ async function submitForm(): Promise<void> {
     ElMessage.warning('请选择调查日期')
     return
   }
-  const duplicated = beltStore
-    .beltsOfSite(siteId.value)
-    .some((belt) => belt.no === form.no.trim() && belt.orientation === form.orientation && belt.id !== editingId.value)
+  const duplicated = scopedBelts.value.some(
+    (belt) => belt.no === form.no.trim() && belt.orientation === form.orientation && belt.id !== editingId.value
+  )
   if (duplicated) {
-    ElMessage.warning(`同一朝向（${form.orientation}）下样带编号「${form.no.trim()}」已存在`)
+    ElMessage.warning(`本次巡访同一朝向（${form.orientation}）下样带编号「${form.no.trim()}」已存在`)
     return
   }
   submitting.value = true
   try {
     const payload = {
+      visitId: editingId.value ? beltStore.beltById(editingId.value)?.visitId ?? null : selectedVisitId.value === 'all' ? null : selectedVisitId.value,
       no: form.no.trim(),
       lengthM: form.lengthM,
       orientation: form.orientation,
@@ -167,9 +214,9 @@ async function removeBelt(belt: Belt): Promise<void> {
 }
 
 async function applyOrientationOrder(): Promise<void> {
-  const belts = beltStore.beltsOfSite(siteId.value)
+  const belts = scopedBelts.value
   if (belts.length === 0) {
-    ElMessage.warning('当前站位还没有样带')
+    ElMessage.warning('当前巡访还没有样带')
     return
   }
   const ordered = [...belts].sort(
@@ -193,7 +240,19 @@ function gotoFishes(belt: Belt): void {
 onMounted(() => {
   if (reefStore.reefs.length === 0) void initDatabase()
   if (site.value) reefStore.selectSite(site.value.id)
+  syncVisitFromQuery()
 })
+
+// 巡次由 liveQuery 异步到达后，补一次默认巡次
+watch(
+  () => visitOptions.value.length,
+  () => {
+    if (selectedVisitId.value === 'all' && visitOptions.value.length > 0) syncVisitFromQuery()
+    if (selectedVisitId.value !== 'all' && !visitOptions.value.some((v) => v.id === selectedVisitId.value)) {
+      syncVisitFromQuery()
+    }
+  }
+)
 </script>
 
 <template>
@@ -231,10 +290,22 @@ onMounted(() => {
             <el-tag size="small" type="info" effect="plain">{{ site.substrate }}</el-tag>
           </h2>
           <p class="gb-hint">
-            布设样带后录入长度、朝向与调查日期；同朝向内样带编号不可重复，列表按北 → 东 → 南 → 西排序。
+            样带挂在具体巡次上：先选一次巡访，再录入长度、朝向与调查日期。同一次巡访内同朝向编号不可重复；季度重访的同编号样带在另一巡次里另算。
           </p>
         </div>
         <div class="page__actions">
+          <el-select :model-value="selectedVisitId" class="page__visit-select" @change="handleVisitChange">
+            <el-option label="全部巡次（仅查看）" value="all" />
+            <el-option
+              v-for="visit in visitOptions"
+              :key="visit.id"
+              :label="visit.name"
+              :value="visit.id"
+            >
+              <span>{{ visit.name }}</span>
+              <span class="gb-hint"> · {{ QUARTER_LABEL[visit.quarter] }} · {{ visitStore.beltCountByVisit[visit.id] ?? 0 }} 条</span>
+            </el-option>
+          </el-select>
           <el-button :icon="Warning" @click="applyOrientationOrder">朝向排序校验</el-button>
           <el-button type="primary" :icon="Plus" @click="openCreate">新增样带</el-button>
         </div>
@@ -257,14 +328,25 @@ onMounted(() => {
 
       <EmptyPanel
         v-if="rows.length === 0"
-        title="该站位还没有样带"
-        description="新增第一条样带并录入长度与朝向，随后即可录入底质、珊瑚分类覆盖与鱼类计数。"
-        action-text="新增样带"
+        :title="selectedVisitId === 'all' ? '请选择一次巡访' : '该次巡访还没有样带'"
+        :description="
+          selectedVisitId === 'all'
+            ? '季度重访的同编号样带按巡次分开管理，请在上方选择某次巡访后查看或布设。'
+            : '新增第一条样带并录入长度与朝向，随后即可录入底质、珊瑚分类覆盖与鱼类计数。'
+        "
+        :action-text="selectedVisitId === 'all' ? '' : '新增样带'"
         @action="openCreate"
       />
 
       <el-table v-else :data="rows" border stripe class="gb-table-compact">
         <el-table-column prop="belt.no" label="样带编号" width="110" />
+        <el-table-column label="所属巡次" min-width="170">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.visit ? 'success' : 'danger'" effect="plain">
+              {{ row.visit ? row.visit.name : '未挂巡次' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="朝向" width="90" align="center">
           <template #default="{ row }">
             <el-tag size="small" effect="plain">{{ row.belt.orientation }}</el-tag>
@@ -393,6 +475,10 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.page__visit-select {
+  width: 220px;
 }
 
 .page__unit {

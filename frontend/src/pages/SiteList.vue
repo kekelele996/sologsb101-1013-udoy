@@ -17,17 +17,17 @@ import BleachTag from '@/components/common/BleachTag.vue'
 import RouteMissingPanel from '@/components/common/RouteMissingPanel.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
-import { useSurveyStore } from '@/stores/surveyStore'
+import { useCanonicalStore } from '@/stores/canonicalStore'
 import { formatLatLng, SUBSTRATES, validateLatLng } from '@/types/site'
 import type { Site } from '@/types/site'
-import { bleachGrade, bleachIndex } from '@/utils/bleach'
+import { bleachGrade } from '@/utils/bleach'
 import { initDatabase } from '@/utils/db'
 
 const route = useRoute()
 const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
-const surveyStore = useSurveyStore()
+const canonical = useCanonicalStore()
 
 const reefId = computed(() => String(route.params.id ?? ''))
 const reef = computed(() => reefStore.reefById(reefId.value))
@@ -54,16 +54,20 @@ const rows = computed(() => {
   })
   return sites.map((site) => {
     const belts = beltStore.beltsOfSite(site.id)
-    const beltIds = new Set(belts.map((belt) => belt.id))
-    const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId))
-    const index = bleachIndex(corals)
+    // 白化指数取该站位在档案室定案年度的口径行（定案 / 后一次），样带数仍是外业实际条数
+    const siteLines = canonical.lines.filter((line) => line.siteId === site.id)
+    const avgIndex =
+      siteLines.length === 0
+        ? 0
+        : Number((siteLines.reduce((sum, line) => sum + line.bleachIndex, 0) / siteLines.length).toFixed(2))
+    const grade = bleachGrade(avgIndex)
     return {
       site,
       beltCount: belts.length,
       beltLengthM: belts.reduce((sum, belt) => sum + belt.lengthM, 0),
-      coralCount: corals.length,
-      bleachIndex: index,
-      grade: bleachGrade(index)
+      coralCount: siteLines.reduce((sum, line) => sum + line.coralCount, 0),
+      bleachIndex: avgIndex,
+      grade
     }
   })
 })

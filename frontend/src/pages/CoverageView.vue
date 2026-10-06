@@ -1,8 +1,10 @@
 <script setup lang="ts">
 /**
  * 模块 6：/coverage 白化等级评定与覆盖度汇总
- * 汇总各样带的珊瑚覆盖率、白化指数与鱼类密度；查看结构版本并导入导出全量 JSON。
- * 复用 <BleachTag>、<FilterBar>。
+ * 评定口径与档案室 / 导出完全一致（utils/reconcile.ts）：
+ * 默认看「档案室定案年度」——定案了按定案巡次重出，未定案取后一次巡访；
+ * 也可切到「外业全部记录」查看普查组每次巡访的原始数据（仅查看，不回退任何定案）。
+ * 另提供结构版本查看与七表全量 JSON 导入导出。复用 <BleachTag>、<FilterBar>。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -17,9 +19,15 @@ import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { useCanonicalStore } from '@/stores/canonicalStore'
 import { BLEACH_LEVELS } from '@/types/coralRecord'
 import type { BleachLevel } from '@/types/coralRecord'
 import { BLEACH_COLOR } from '@/utils/bleach'
+import {
+  CANONICAL_STATUS_LABEL,
+  RESOLUTION_POLICY,
+  type CanonicalLine
+} from '@/utils/reconcile'
 import {
   DB_NAME,
   DB_VERSION,
@@ -31,8 +39,9 @@ import {
 } from '@/utils/db'
 import {
   buildBackupPayload,
-  buildReefSummaries,
+  buildConclusionText,
   countPayload,
+  downloadConclusionText,
   exportBackupJson,
   importBackup,
   readFileText,
@@ -45,17 +54,33 @@ const route = useRoute()
 const router = useRouter()
 const reefStore = useReefStore()
 const surveyStore = useSurveyStore()
+const canonical = useCanonicalStore()
 
-const EMPTY_COUNTS: CountMap = { reefs: 0, sites: 0, belts: 0, corals: 0, fishes: 0 }
+const EMPTY_COUNTS: CountMap = {
+  reefs: 0,
+  sites: 0,
+  visits: 0,
+  finalizations: 0,
+  belts: 0,
+  corals: 0,
+  fishes: 0
+}
 
 const counts = ref<CountMap>(EMPTY_COUNTS)
 const lastBackupAt = ref<string | null>(null)
 const stampedVersion = ref<number>(DB_VERSION)
-const reefSummaries = ref<ReturnType<typeof buildReefSummaries>>([])
 const overwriteOnImport = ref(true)
 const fileList = ref<UploadFile[]>([])
 const busy = ref(false)
 const notice = ref('')
+/** scope=archive 看档案室定案口径；scope=field 看外业每次巡访原始记录 */
+const scope = ref<'archive' | 'field'>('archive')
+
+/** 外业全部记录口径行（每次巡访各一行，不做任何取舍） */
+const fieldRows = computed(() => surveyStore.coverageRows)
+
+/** 档案室定案口径行（定案巡次 / 后一次） */
+const archiveRows = computed<CanonicalLine[]>(() => canonical.lines)
 
 const filterModel = computed<FilterModel>(() => ({
   keyword: surveyStore.filter.keyword,
@@ -63,7 +88,49 @@ const filterModel = computed<FilterModel>(() => ({
   bleachLevels: surveyStore.filter.bleachLevels
 }))
 
-const rows = computed(() => surveyStore.filteredCoverageRows)
+/** 当前口径下的行（统一过一遍筛选） */
+const rows = computed(() => {
+  const source: Array<{
+    beltId: string
+    beltNo: string
+    reefId: string
+    reefName: string
+    siteNo: string
+    lengthM: number
+    orientation: string
+    surveyDate: string
+    observer: string
+    coralCount: number
+    coverCmTotal: number
+    coveragePct: number
+    bleachIndex: number
+    grade: BleachLevel
+    bleachedSharePct: number
+    distribution: Record<BleachLevel, number>
+    fishTotal: number
+    invertebrateTotal: number
+    fishDensity: number
+    statusText?: string
+  }> =
+    scope.value === 'archive'
+      ? archiveRows.value.map((line) => ({ ...line, statusText: CANONICAL_STATUS_LABEL[line.status] }))
+      : fieldRows.value.map((line) => ({ ...line, statusText: '' }))
+
+  return source.filter((row) => {
+    const keyword = surveyStore.filter.keyword.trim()
+    if (keyword.length > 0) {
+      const haystack = `${row.reefName}${row.siteNo}${row.beltNo}${row.observer}`
+      if (!haystack.includes(keyword)) return false
+    }
+    if (surveyStore.filter.reefIds.length > 0 && !surveyStore.filter.reefIds.includes(row.reefId)) return false
+    if (surveyStore.filter.bleachLevels.length > 0) {
+      const matched = surveyStore.filter.bleachLevels.some((level) => row.distribution[level] > 0)
+      if (!matched) return false
+    }
+    if (surveyStore.filter.onlyBleached && row.bleachedSharePct <= 0) return false
+    return true
+  })
+})
 
 const totals = computed(() => ({
   belts: rows.value.length,
@@ -103,30 +170,6 @@ async function refresh(): Promise<void> {
   counts.value = (await countAll()) as CountMap
   lastBackupAt.value = readLastBackupAt()
   stampedVersion.value = readStampedDbVersion()
-  const payload = await buildBackupPayload()
-  reefSummaries.value = buildReefSummaries(payload, surveyStore.coverageRows.map((row) => ({
-    beltId: row.beltId,
-    beltNo: row.beltNo,
-    reefId: row.reefId,
-    reefName: row.reefName,
-    siteId: row.siteId,
-    siteNo: row.siteNo,
-    lengthM: row.lengthM,
-    orientation: row.orientation,
-    surveyDate: row.surveyDate,
-    observer: row.observer,
-    coralCount: row.coralCount,
-    coverCmTotal: row.coverCmTotal,
-    coveragePct: row.coveragePct,
-    bleachIndex: row.bleachIndex,
-    grade: row.grade,
-    bleachedSharePct: row.bleachedSharePct,
-    distribution: row.distribution,
-    fishTotal: row.fishTotal,
-    invertebrateTotal: row.invertebrateTotal,
-    fishDensity: row.fishDensity,
-    conclusion: ''
-  })))
 }
 
 function handleFilterChange(): void {
@@ -150,11 +193,20 @@ async function handleExport(): Promise<void> {
   try {
     const result = await exportBackupJson()
     await refresh()
-    notice.value = `已导出 ${result.fileName}（共 ${Object.values(result.counts).reduce((sum, value) => sum + value, 0)} 条记录）。`
+    notice.value = `已导出全量备份 ${result.fileName}（七张表共 ${Object.values(result.counts).reduce((sum, value) => sum + value, 0)} 条记录）。`
     ElMessage.success(notice.value)
   } finally {
     busy.value = false
   }
+}
+
+/** 导出评定结论：始终用档案室定案年度的统一口径 */
+async function handleExportConclusion(): Promise<void> {
+  const payload = await buildBackupPayload()
+  const text = buildConclusionText(payload, canonical.year, canonical.mismatches)
+  const fileName = downloadConclusionText(text, canonical.year)
+  notice.value = `已按${canonical.year}年度统一口径导出结论 ${fileName}。`
+  ElMessage.success(notice.value)
 }
 
 async function handleImport(): Promise<void> {
@@ -181,15 +233,15 @@ async function handleImport(): Promise<void> {
     const payload: BackupPayload = overwriteOnImport.value ? validation.payload : remapIds(validation.payload)
     const summary = countPayload(payload)
     await ElMessageBox.confirm(
-      `将导入 ${Object.entries(summary)
-        .map(([key, value]) => `${key} ${value} 条`)
-        .join('、')}；${overwriteOnImport.value ? '覆盖模式会先清空现有本地数据' : '追加模式会重新分配 id 保留现有数据'}。确认继续？`,
+      `将导入 reefs/sites/visits/finalizations/belts/corals/fishes 共 ${Object.entries(summary)
+        .map(([key, value]) => `${key} ${value}`)
+        .join('、')} 条；${overwriteOnImport.value ? '覆盖模式会先清空现有本地数据' : '追加模式会重新分配 id 保留现有数据'}。确认继续？`,
       '导入确认',
       { type: 'warning', confirmButtonText: '继续导入', cancelButtonText: '取消' }
     )
     await importBackup(payload, overwriteOnImport.value)
     await refresh()
-    notice.value = '导入完成，覆盖度汇总已刷新。'
+    notice.value = '导入完成，覆盖度汇总已按定案口径刷新。'
     ElMessage.success(notice.value)
   } finally {
     busy.value = false
@@ -200,7 +252,7 @@ async function handleImport(): Promise<void> {
 async function handleDatabaseReset(): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      '将清空全部本地数据并重新播种演示数据（礁区、站位、样带、珊瑚记录、鱼类计数）。确认继续？',
+      '将清空全部本地数据并重新播种演示数据（含巡次与年度定案）。确认继续？',
       '重置本地数据',
       { type: 'warning', confirmButtonText: '清空并重建', cancelButtonText: '取消' }
     )
@@ -217,7 +269,7 @@ async function copySummary(): Promise<void> {
   const text = rows.value
     .map(
       (row) =>
-        `${row.reefName}｜站位 ${row.siteNo}｜样带 ${row.beltNo}（${row.orientation}向 ${row.lengthM} m）：珊瑚覆盖率 ${row.coveragePct}%，白化指数 ${row.bleachIndex}（${row.grade}），白化占比 ${row.bleachedSharePct}%，鱼类 ${row.fishTotal} 尾（${row.fishDensity} 尾/100m²）`
+        `${row.reefName}｜站位 ${row.siteNo}｜样带 ${row.beltNo}（${row.orientation}向 ${row.lengthM} m）：珊瑚覆盖率 ${row.coveragePct}%，白化指数 ${row.bleachIndex}（${row.grade}），白化占比 ${row.bleachedSharePct}%，鱼类 ${row.fishTotal} 尾（${row.fishDensity} 尾/100m²）${row.statusText ? `［${row.statusText}］` : ''}`
     )
     .join('\n')
   try {
@@ -229,6 +281,8 @@ async function copySummary(): Promise<void> {
     ElMessage.warning(notice.value)
   }
 }
+
+const reefSummaries = computed(() => canonical.reefSummaries)
 
 onMounted(() => {
   surveyStore.patchFilter({
@@ -249,20 +303,32 @@ onMounted(() => {
       <div>
         <h2 class="page__title">白化等级评定与覆盖度汇总</h2>
         <p class="gb-hint">
-          按样带汇总珊瑚覆盖率、白化指数（按覆盖长度加权，0 ~ 4）与鱼类密度，并可按礁区、白化等级筛选；同时提供结构版本查看与 JSON 导入导出。
+          评定与档案室 / 导出同一口径：{{ RESOLUTION_POLICY.label }}。
         </p>
       </div>
       <div class="page__actions">
+        <el-radio-group v-model="scope">
+          <el-radio-button value="archive">档案室定案（{{ canonical.year }} 年度）</el-radio-button>
+          <el-radio-button value="field">外业全部巡访记录</el-radio-button>
+        </el-radio-group>
+        <el-select
+          :model-value="canonical.year"
+          class="page__year-select"
+          :disabled="scope !== 'archive'"
+          @change="(v: number) => canonical.selectYear(Number(v))"
+        >
+          <el-option v-for="y in canonical.years.length ? canonical.years : [canonical.year]" :key="y" :label="`${y} 年`" :value="y" />
+        </el-select>
         <el-button :icon="Refresh" @click="refresh">刷新</el-button>
         <el-button @click="copySummary">复制结论</el-button>
-        <el-button type="primary" :icon="Download" :loading="busy" @click="handleExport">导出 JSON</el-button>
+        <el-button type="primary" :icon="Download" :loading="busy" @click="handleExportConclusion">导出结论</el-button>
       </div>
     </div>
 
     <el-alert v-if="notice" type="success" :closable="false" show-icon :title="notice" />
 
     <div class="gb-stats-row">
-      <StatBadge label="样带数" :value="totals.belts" suffix="条" icon="Files" />
+      <StatBadge label="口径样带数" :value="totals.belts" suffix="条" icon="Files" />
       <StatBadge label="珊瑚记录" :value="totals.coralCount" suffix="条" tone="info" icon="Histogram" />
       <StatBadge label="覆盖长度合计" :value="totals.coverCmTotal" suffix="cm" tone="success" icon="Odometer" />
       <StatBadge label="平均覆盖率" :value="totals.avgCoveragePct" suffix="%" :percent="Math.min(100, totals.avgCoveragePct)" icon="PieChart" />
@@ -302,8 +368,8 @@ onMounted(() => {
       <div class="gb-panel-title">
         <h3>白化等级分布（覆盖长度 cm）</h3>
         <span class="gb-hint">
-          总体白化指数 {{ surveyStore.globalStats.bleachIndex }}（{{ surveyStore.globalStats.grade }}）· 白化占比
-          {{ surveyStore.globalStats.bleachedSharePct }}% · 存在白化样带 {{ totals.bleachedBelts }} 条
+          {{ scope === 'archive' ? `档案室定案口径 · ${canonical.year} 年度` : '外业每次巡访原始记录（不做取舍）' }}
+          · 存在白化样带 {{ totals.bleachedBelts }} 条
         </span>
       </div>
       <div class="gb-bars">
@@ -322,14 +388,14 @@ onMounted(() => {
 
     <el-card shadow="never" class="gb-panel">
       <div class="gb-panel-title">
-        <h3>按样带的覆盖度成果（{{ rows.length }} 条）</h3>
-        <span class="gb-hint">按白化指数降序排列</span>
+        <h3>{{ scope === 'archive' ? `定案口径覆盖度成果（${canonical.year} 年，${rows.length} 条）` : `外业全部巡访样带（${rows.length} 条）` }}</h3>
+        <span class="gb-hint">按白化指数降序；定案了按定案巡次，未定案取后一次，绝不平均</span>
       </div>
 
       <EmptyPanel
         v-if="rows.length === 0"
         title="没有符合条件的样带"
-        description="请先到礁区台账布设站位与样带，并录入珊瑚分类覆盖与鱼类计数；也可调整当前筛选条件。"
+        description="请先登记巡访并布设样带、录入珊瑚与鱼类；档案室可在「礁区档案室」定案年度巡次。"
         compact
       />
 
@@ -340,29 +406,37 @@ onMounted(() => {
             <div class="gb-hint">站位 {{ row.siteNo }} · 样带 {{ row.beltNo }}（{{ row.orientation }}向）</div>
           </template>
         </el-table-column>
-        <el-table-column label="样带长度" width="110" align="right">
+        <el-table-column v-if="scope === 'archive'" label="口径 / 巡次" min-width="180">
           <template #default="{ row }">
-            <span class="gb-mono">{{ row.lengthM }} m</span>
+            <el-tag
+              size="small"
+              :type="row.statusText && row.statusText.includes('不一致') ? 'warning' : row.statusText && row.statusText.includes('缺测') ? 'warning' : 'success'"
+              effect="plain"
+            >
+              {{ row.statusText }}
+            </el-tag>
+            <div class="gb-hint">{{ row.surveyDate }} · {{ row.observer || '调查人未填' }}</div>
           </template>
         </el-table-column>
-        <el-table-column label="珊瑚记录" width="100" align="right">
-          <template #default="{ row }">
-            <span class="gb-mono">{{ row.coralCount }}</span>
-          </template>
+        <el-table-column label="样带长度" width="100" align="right">
+          <template #default="{ row }"><span class="gb-mono">{{ row.lengthM }} m</span></template>
         </el-table-column>
-        <el-table-column label="覆盖率" width="130" align="right">
+        <el-table-column label="珊瑚记录" width="90" align="right">
+          <template #default="{ row }"><span class="gb-mono">{{ row.coralCount }}</span></template>
+        </el-table-column>
+        <el-table-column label="覆盖率" width="125" align="right">
           <template #default="{ row }">
             <span class="gb-mono">{{ row.coveragePct }}%</span>
             <div class="gb-hint gb-mono">{{ row.coverCmTotal }} cm</div>
           </template>
         </el-table-column>
-        <el-table-column label="白化评定" width="170">
+        <el-table-column label="白化评定" width="165">
           <template #default="{ row }">
             <BleachTag :level="row.grade" size="small" />
-            <div class="gb-hint gb-mono">指数 {{ row.bleachIndex }} · 白化占比 {{ row.bleachedSharePct }}%</div>
+            <div class="gb-hint gb-mono">指数 {{ row.bleachIndex }} · 占比 {{ row.bleachedSharePct }}%</div>
           </template>
         </el-table-column>
-        <el-table-column label="白化等级分布 (cm)" min-width="220">
+        <el-table-column label="白化等级分布 (cm)" min-width="200">
           <template #default="{ row }">
             <div class="page__mini-bars">
               <span
@@ -379,18 +453,16 @@ onMounted(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="鱼类" width="130" align="right">
+        <el-table-column label="鱼类" width="120" align="right">
           <template #default="{ row }">
             <span class="gb-mono">{{ row.fishTotal }} 尾</span>
             <div class="gb-hint gb-mono">{{ row.fishDensity }} 尾/100m²</div>
           </template>
         </el-table-column>
-        <el-table-column label="无脊椎动物" width="120" align="right">
-          <template #default="{ row }">
-            <span class="gb-mono">{{ row.invertebrateTotal }} 个</span>
-          </template>
+        <el-table-column label="无脊椎动物" width="100" align="right">
+          <template #default="{ row }"><span class="gb-mono">{{ row.invertebrateTotal }} 个</span></template>
         </el-table-column>
-        <el-table-column label="调查" min-width="150">
+        <el-table-column v-if="scope === 'field'" label="调查" min-width="140">
           <template #default="{ row }">
             <div class="gb-mono">{{ row.surveyDate }}</div>
             <div class="gb-hint">{{ row.observer || '未填写调查人' }}</div>
@@ -399,39 +471,39 @@ onMounted(() => {
       </el-table>
     </el-card>
 
-    <el-card shadow="never" class="gb-panel">
+    <el-card v-if="scope === 'archive'" shadow="never" class="gb-panel">
       <div class="gb-panel-title">
-        <h3>按礁区的白化评定</h3>
-        <span class="gb-hint">平均白化指数为礁区内各样带白化指数的算术平均</span>
+        <h3>按礁区的年度评定（{{ canonical.year }} 年）</h3>
+        <span class="gb-hint">定案后覆盖率 / 白化指数按定案巡次重出；未定案取后一次巡访</span>
       </div>
       <el-table :data="reefSummaries" border stripe class="gb-table-compact">
-        <el-table-column prop="reefName" label="礁区" min-width="160" />
-        <el-table-column prop="protectStatus" label="保护区状态" width="130" />
-        <el-table-column label="站位 / 样带" width="130" align="right">
+        <el-table-column prop="reefName" label="礁区" min-width="150" />
+        <el-table-column label="定案巡次" min-width="180">
           <template #default="{ row }">
-            <span class="gb-mono">{{ row.siteCount }} / {{ row.beltCount }}</span>
+            <el-tag v-if="row.finalizedVisitId" type="success" size="small">{{ row.finalizedVisitName }}</el-tag>
+            <el-tag v-else type="info" size="small" effect="plain">未定案 · 取后一次</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="珊瑚记录" width="110" align="right">
-          <template #default="{ row }">
-            <span class="gb-mono">{{ row.coralCount }}</span>
-          </template>
+        <el-table-column label="站位 / 样带" width="110" align="right">
+          <template #default="{ row }"><span class="gb-mono">{{ row.siteCount }} / {{ row.beltCount }}</span></template>
         </el-table-column>
-        <el-table-column label="覆盖长度" width="130" align="right">
-          <template #default="{ row }">
-            <span class="gb-mono">{{ row.coverCmTotal }} cm</span>
-          </template>
+        <el-table-column label="平均覆盖率" width="110" align="right">
+          <template #default="{ row }"><span class="gb-mono">{{ row.avgCoveragePct }}%</span></template>
         </el-table-column>
-        <el-table-column label="平均白化指数" width="160">
+        <el-table-column label="平均白化" width="170">
           <template #default="{ row }">
             <BleachTag :level="row.grade" size="small" />
-            <span class="gb-hint gb-mono"> {{ row.avgBleachIndex }}</span>
+            <span class="gb-hint gb-mono"> {{ row.avgBleachIndex }} · 占比 {{ row.bleachedSharePct }}%</span>
           </template>
         </el-table-column>
-        <el-table-column label="鱼类计数" width="120" align="right">
+        <el-table-column label="差异" width="80" align="center">
           <template #default="{ row }">
-            <span class="gb-mono">{{ row.fishTotal }}</span>
+            <el-badge v-if="row.mismatchCount > 0" :value="row.mismatchCount" type="warning" />
+            <span v-else class="gb-hint">无</span>
           </template>
+        </el-table-column>
+        <el-table-column label="鱼类" width="90" align="right">
+          <template #default="{ row }"><span class="gb-mono">{{ row.fishTotal }}</span></template>
         </el-table-column>
       </el-table>
     </el-card>
@@ -440,7 +512,7 @@ onMounted(() => {
       <div class="gb-panel-title">
         <h3>结构版本与全量 JSON 导入导出</h3>
         <span class="gb-hint">
-          导出内容包含 reefs / sites / belts / corals / fishes 五张表 · 最近备份
+          导出包含 reefs / sites / visits / finalizations / belts / corals / fishes 七张表 · 最近备份
           {{ lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '尚未备份' }}
         </span>
       </div>
@@ -468,7 +540,7 @@ onMounted(() => {
         </el-form-item>
         <el-form-item>
           <el-button type="primary" :icon="Upload" :loading="busy" @click="handleImport">开始导入</el-button>
-          <el-button :icon="Download" @click="handleExport">导出当前数据</el-button>
+          <el-button :icon="Download" @click="handleExport">导出全量备份</el-button>
           <el-button type="danger" plain @click="handleDatabaseReset">清空并重建演示数据</el-button>
         </el-form-item>
       </el-form>
@@ -477,6 +549,7 @@ onMounted(() => {
         <el-descriptions-item label="本地库名">{{ DB_NAME }}</el-descriptions-item>
         <el-descriptions-item label="结构版本">v{{ DB_VERSION }}（浏览器记录 v{{ stampedVersion }}）</el-descriptions-item>
         <el-descriptions-item label="礁区 / 站位">{{ counts.reefs }} / {{ counts.sites }}</el-descriptions-item>
+        <el-descriptions-item label="巡次 / 定案">{{ counts.visits }} / {{ counts.finalizations }}</el-descriptions-item>
         <el-descriptions-item label="样带 / 珊瑚记录">{{ counts.belts }} / {{ counts.corals }}</el-descriptions-item>
         <el-descriptions-item label="鱼类计数">{{ counts.fishes }}</el-descriptions-item>
         <el-descriptions-item label="最近备份时间">
@@ -514,7 +587,12 @@ onMounted(() => {
 .page__actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
+}
+
+.page__year-select {
+  width: 110px;
 }
 
 .page__mini-bars {

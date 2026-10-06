@@ -14,6 +14,18 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '礁区台账', icon: 'Odometer' }
   },
   {
+    path: '/field/visits',
+    name: 'field-visits',
+    component: () => import('@/pages/FieldVisitBoard.vue'),
+    meta: { title: '外业普查 · 巡次登记', icon: 'Compass' }
+  },
+  {
+    path: '/archive',
+    name: 'archive-room',
+    component: () => import('@/pages/ArchiveRoom.vue'),
+    meta: { title: '礁区档案室 · 定案与对账', icon: 'CollectionTag' }
+  },
+  {
     path: '/reefs/:id/sites',
     name: 'site-list',
     component: () => import('@/pages/SiteList.vue'),

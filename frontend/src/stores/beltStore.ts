@@ -35,7 +35,7 @@ export const useBeltStore = defineStore('belt', () => {
     })
   }
 
-  /** 某站位下的样带：先按朝向（北→东→南→西）再按编号排序 */
+  /** 某站位下的样带：先按朝向（北→东→南→西）再按编号排序（含全部巡次） */
   function beltsOfSite(siteId: string | null | undefined): Belt[] {
     if (!siteId) return []
     return belts.value
@@ -47,11 +47,16 @@ export const useBeltStore = defineStore('belt', () => {
       })
   }
 
+  /** 某站位某次巡访下的样带（重访时同编号样带各属各的巡次，互不冲突） */
+  function beltsOfSiteVisit(siteId: string | null | undefined, visitId: string | null): Belt[] {
+    return beltsOfSite(siteId).filter((belt) => belt.visitId === visitId)
+  }
+
   const currentBelt = computed<Belt | null>(
     () => belts.value.find((belt) => belt.id === currentBeltId.value) ?? null
   )
 
-  /** 站位 id → 样带数与总长度 */
+  /** 站位 id → 样带数与总长度（全部巡次） */
   const siteBeltStats = computed<Record<string, { count: number; totalLengthM: number }>>(() => {
     const stats: Record<string, { count: number; totalLengthM: number }> = {}
     belts.value.forEach((belt) => {
@@ -72,12 +77,18 @@ export const useBeltStore = defineStore('belt', () => {
     return stats
   })
 
-  /** 朝向排序校验：同一站位内朝向 + 编号重复时返回提示 */
-  function findBeltConflicts(siteId: string | null | undefined): string[] {
+  /**
+   * 朝向 + 编号重复校验：同一站位「同一次巡访」内不可重复；
+   * 不同巡次（重访）允许同编号样带并存。
+   */
+  function findBeltConflicts(siteId: string | null | undefined, visitId?: string | null): string[] {
     if (!siteId) return []
+    const scope = beltsOfSite(siteId).filter((belt) =>
+      visitId === undefined ? true : belt.visitId === visitId
+    )
     const seen = new Map<string, string>()
     const conflicts: string[] = []
-    beltsOfSite(siteId).forEach((belt) => {
+    scope.forEach((belt) => {
       const key = `${belt.orientation}-${belt.no}`
       if (seen.has(key)) conflicts.push(`${belt.orientation}向 ${belt.no}`)
       else seen.set(key, belt.id)
@@ -146,6 +157,7 @@ export const useBeltStore = defineStore('belt', () => {
     orientationStats,
     start,
     beltsOfSite,
+    beltsOfSiteVisit,
     findBeltConflicts,
     resetDraft,
     selectBelt,

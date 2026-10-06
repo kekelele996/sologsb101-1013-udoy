@@ -16,17 +16,16 @@ import BleachTag from '@/components/common/BleachTag.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
-import { useSurveyStore } from '@/stores/surveyStore'
+import { useCanonicalStore } from '@/stores/canonicalStore'
 import { AREA_BUCKETS, createEmptyReefFilter, PROTECT_STATUSES } from '@/types/reef'
 import type { ProtectStatus, Reef } from '@/types/reef'
-import { bleachGrade, bleachIndex } from '@/utils/bleach'
 import { initDatabase } from '@/utils/db'
 
 const route = useRoute()
 const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
-const surveyStore = useSurveyStore()
+const canonical = useCanonicalStore()
 
 const dialogVisible = ref(false)
 const editingId = ref<string | null>(null)
@@ -40,24 +39,25 @@ const form = reactive({
   manager: ''
 })
 
-/** 礁区卡片：汇总站位/样带/珊瑚记录数与平均白化指数 */
+/**
+ * 礁区卡片：站位 / 样带为外业实际数量；白化指数取档案室定案年度口径
+ *（定案按定案巡次，未定案取后一次），避免把多次季度巡访混算。
+ */
 const cards = computed(() =>
   reefStore.filteredReefs.map((reef: Reef) => {
     const sites = reefStore.sites.filter((site) => site.reefId === reef.id)
     const siteIds = new Set(sites.map((site) => site.id))
     const belts = beltStore.belts.filter((belt) => siteIds.has(belt.siteId))
-    const beltIds = new Set(belts.map((belt) => belt.id))
-    const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId))
-    const fishes = surveyStore.fishes.filter((fish) => beltIds.has(fish.beltId))
-    const index = bleachIndex(corals)
+    const summary = canonical.reefSummaries.find((item) => item.reefId === reef.id)
     return {
       reef,
       siteCount: sites.length,
       beltCount: belts.length,
-      coralCount: corals.length,
-      fishTotal: fishes.reduce((sum, fish) => sum + fish.count, 0),
-      bleachIndex: index,
-      grade: bleachGrade(index)
+      coralCount: summary?.coralCount ?? 0,
+      fishTotal: summary?.fishTotal ?? 0,
+      bleachIndex: summary?.avgBleachIndex ?? 0,
+      grade: summary?.grade ?? '无',
+      finalizedVisitName: summary?.finalizedVisitName ?? ''
     }
   })
 )
