@@ -5,10 +5,12 @@
  */
 import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DataLine, Files, Grid, Odometer, PieChart } from '@element-plus/icons-vue'
+import { DataLine, Files, FolderChecked, Grid, Odometer, PieChart } from '@element-plus/icons-vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { useVisitStore } from '@/stores/visitStore'
+import { useArchiveStore } from '@/stores/archiveStore'
 import { DB_NAME, DB_VERSION } from '@/utils/db'
 
 const route = useRoute()
@@ -16,11 +18,15 @@ const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
 const surveyStore = useSurveyStore()
+const visitStore = useVisitStore()
+const archiveStore = useArchiveStore()
 
 onMounted(() => {
   reefStore.start()
   beltStore.start()
   surveyStore.start()
+  visitStore.start()
+  archiveStore.start()
 })
 
 /** 层级路由统一归属到最上层导航项 */
@@ -33,7 +39,8 @@ const activeKey = computed(() => {
 
 const navItems = computed(() => [
   { key: '/reefs', label: '礁区台账', icon: Odometer, badge: String(reefStore.reefs.length) },
-  { key: '/coverage', label: '覆盖度汇总', icon: PieChart, badge: String(surveyStore.corals.length) }
+  { key: '/coverage', label: '覆盖度汇总', icon: PieChart, badge: String(surveyStore.corals.length) },
+  { key: '/archive', label: '档案室定案', icon: FolderChecked, badge: String(archiveStore.finalizations.length) }
 ])
 
 /** 当前上下文的快捷入口：礁区 → 站位 → 样带 → 珊瑚/鱼类 */
@@ -55,6 +62,7 @@ const contextLinks = computed(() => {
     links.push({ label: '鱼类计数', path: `/belts/${id}/fishes` })
   }
   if (route.path.startsWith('/coverage')) links.push({ label: '礁区台账', path: '/reefs' })
+  if (route.path.startsWith('/archive')) links.push({ label: '覆盖度汇总', path: '/coverage' })
   return links
 })
 
@@ -107,8 +115,9 @@ function go(path: string): void {
         本地库 {{ DB_NAME }} · 结构版本 v{{ DB_VERSION }} · 数据仅存于本浏览器 IndexedDB，不上传任何服务器。
       </span>
       <span>
-        礁区 {{ reefStore.reefs.length }} · 站位 {{ reefStore.sites.length }} · 样带 {{ beltStore.belts.length }} · 珊瑚记录
-        {{ surveyStore.corals.length }} · 计数记录 {{ surveyStore.fishes.length }}
+        礁区 {{ reefStore.reefs.length }} · 站位 {{ reefStore.sites.length }} · 巡次 {{ visitStore.visits.length }} ·
+        样带 {{ beltStore.belts.length }} · 珊瑚记录 {{ surveyStore.corals.length }} · 计数记录
+        {{ surveyStore.fishes.length }} · 年度定案 {{ archiveStore.finalizations.length }}
       </span>
     </footer>
   </div>

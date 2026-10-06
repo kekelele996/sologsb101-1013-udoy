@@ -152,21 +152,29 @@ export const useReefStore = defineStore('reef', () => {
     await db.reefs.update(id, { ...patch, updatedAt: Date.now() } as never)
   }
 
-  /** 删除礁区：级联删除其站位、样带、珊瑚记录与鱼类计数 */
+  /** 删除礁区：级联删除其站位、样带、珊瑚记录、鱼类计数，以及档案室定案与对账记录 */
   async function removeReef(id: string): Promise<void> {
-    await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
-      const siteIds = (await db.sites.where('reefId').equals(id).toArray()).map((row) => row.id)
-      if (siteIds.length > 0) {
-        const beltIds = (await db.belts.where('siteId').anyOf(siteIds).toArray()).map((row) => row.id)
-        if (beltIds.length > 0) {
-          await db.corals.where('beltId').anyOf(beltIds).delete()
-          await db.fishes.where('beltId').anyOf(beltIds).delete()
-          await db.belts.bulkDelete(beltIds)
+    await db.transaction(
+      'rw',
+      [db.reefs, db.sites, db.belts, db.corals, db.fishes, db.finalizations, db.reconciliations],
+      async () => {
+        const siteIds = (await db.sites.where('reefId').equals(id).toArray()).map((row) => row.id)
+        if (siteIds.length > 0) {
+          const beltIds = (await db.belts.where('siteId').anyOf(siteIds).toArray()).map((row) => row.id)
+          if (beltIds.length > 0) {
+            await db.corals.where('beltId').anyOf(beltIds).delete()
+            await db.fishes.where('beltId').anyOf(beltIds).delete()
+            await db.belts.bulkDelete(beltIds)
+          }
+          await db.sites.bulkDelete(siteIds)
         }
-        await db.sites.bulkDelete(siteIds)
+        // 巡次是跨礁区共享的重访台账，删礁区不动巡次；只清该礁区的档案室结论
+        const finIds = (await db.finalizations.where('reefId').equals(id).toArray()).map((row) => row.id)
+        if (finIds.length > 0) await db.reconciliations.where('finalizationId').anyOf(finIds).delete()
+        await db.finalizations.where('reefId').equals(id).delete()
+        await db.reefs.delete(id)
       }
-      await db.reefs.delete(id)
-    })
+    )
     if (currentReefId.value === id) selectReef(null)
   }
 

@@ -17,6 +17,9 @@ import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { useVisitStore } from '@/stores/visitStore'
+import { useArchiveStore } from '@/stores/archiveStore'
+import { useArchive } from '@/hooks/useArchive'
 import { AREA_BUCKETS, createEmptyReefFilter, PROTECT_STATUSES } from '@/types/reef'
 import type { ProtectStatus, Reef } from '@/types/reef'
 import { bleachGrade, bleachIndex } from '@/utils/bleach'
@@ -27,6 +30,9 @@ const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
 const surveyStore = useSurveyStore()
+const visitStore = useVisitStore()
+const archiveStore = useArchiveStore()
+const archive = useArchive()
 
 const dialogVisible = ref(false)
 const editingId = ref<string | null>(null)
@@ -40,7 +46,11 @@ const form = reactive({
   manager: ''
 })
 
-/** 礁区卡片：汇总站位/样带/珊瑚记录数与平均白化指数 */
+/**
+ * 礁区卡片：站位/样带/珊瑚计数为普查组全部巡次原始统计；
+ * 覆盖率与平均白化指数优先展示档案室「最近一次已定案年度」的口径（按定案巡次重出），
+ * 未定案的礁区回退普查原始口径并标注「未定案」。
+ */
 const cards = computed(() =>
   reefStore.filteredReefs.map((reef: Reef) => {
     const sites = reefStore.sites.filter((site) => site.reefId === reef.id)
@@ -49,15 +59,24 @@ const cards = computed(() =>
     const beltIds = new Set(belts.map((belt) => belt.id))
     const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId))
     const fishes = surveyStore.fishes.filter((fish) => beltIds.has(fish.beltId))
-    const index = bleachIndex(corals)
+    const rawIndex = bleachIndex(corals)
+
+    const fin = archiveStore.latestFinalizationByReef.get(reef.id) ?? null
+    const finalized = fin ? archive.latestResultForReef(reef.id).value : null
     return {
       reef,
       siteCount: sites.length,
       beltCount: belts.length,
+      visitCount: visitStore.visits.length === 0 ? 0 : new Set(belts.map((belt) => belt.visitId)).size,
       coralCount: corals.length,
       fishTotal: fishes.reduce((sum, fish) => sum + fish.count, 0),
-      bleachIndex: index,
-      grade: bleachGrade(index)
+      finalized,
+      finalizedYear: fin?.year ?? null,
+      finalizedVisitCode: finalized?.visitCode ?? null,
+      coveragePct: finalized ? finalized.summary.avgCoveragePct : null,
+      bleachIndex: finalized ? finalized.summary.avgBleachIndex : rawIndex,
+      grade: finalized ? finalized.summary.grade : bleachGrade(rawIndex),
+      mismatchCount: finalized?.mismatches.length ?? 0
     }
   })
 )
@@ -278,6 +297,10 @@ watch(
             <div>
               <strong class="reef-card__name">{{ card.reef.name }}</strong>
               <el-tag size="small" effect="plain" class="reef-card__status">{{ card.reef.protectStatus }}</el-tag>
+              <el-tag v-if="card.finalized" size="small" type="success" effect="dark">
+                {{ card.finalizedYear }} 定案 · {{ card.finalizedVisitCode }}
+              </el-tag>
+              <el-tag v-else size="small" type="info" effect="plain">未定案（普查原始）</el-tag>
             </div>
             <BleachTag :level="card.grade" size="small" />
           </div>
@@ -286,9 +309,16 @@ watch(
         <div class="reef-card__stats">
           <StatBadge label="站位" :value="card.siteCount" suffix="个" size="small" tone="info" icon="Grid" />
           <StatBadge label="样带" :value="card.beltCount" suffix="条" size="small" icon="Files" />
-          <StatBadge label="珊瑚记录" :value="card.coralCount" suffix="条" size="small" tone="success" icon="Histogram" />
           <StatBadge
-            label="白化指数"
+            label="覆盖率"
+            :value="card.coveragePct === null ? '—' : card.coveragePct"
+            :suffix="card.coveragePct === null ? '' : '%'"
+            size="small"
+            tone="info"
+            icon="PieChart"
+          />
+          <StatBadge
+            :label="card.finalized ? '定案白化指数' : '原始白化指数'"
             :value="card.bleachIndex"
             suffix="/ 4"
             size="small"
@@ -299,7 +329,9 @@ watch(
 
         <div class="reef-card__meta">
           <span>面积 <b class="gb-mono">{{ card.reef.areaKm2 }}</b> km²</span>
+          <span>巡访 <b class="gb-mono">{{ card.visitCount }}</b> 次</span>
           <span>鱼获计数 <b class="gb-mono">{{ card.fishTotal }}</b></span>
+          <el-tag v-if="card.mismatchCount > 0" size="small" type="warning">定案对账 {{ card.mismatchCount }} 条对不上</el-tag>
           <span v-if="card.reef.manager">管理单位：{{ card.reef.manager }}</span>
         </div>
 

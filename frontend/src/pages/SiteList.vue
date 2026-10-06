@@ -18,6 +18,7 @@ import RouteMissingPanel from '@/components/common/RouteMissingPanel.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { useVisitStore } from '@/stores/visitStore'
 import { formatLatLng, SUBSTRATES, validateLatLng } from '@/types/site'
 import type { Site } from '@/types/site'
 import { bleachGrade, bleachIndex } from '@/utils/bleach'
@@ -28,6 +29,7 @@ const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
 const surveyStore = useSurveyStore()
+const visitStore = useVisitStore()
 
 const reefId = computed(() => String(route.params.id ?? ''))
 const reef = computed(() => reefStore.reefById(reefId.value))
@@ -43,7 +45,11 @@ const form = reactive({
   substrate: SUBSTRATES[0]
 })
 
-/** 站位行：汇总样带数、珊瑚记录数与平均白化指数 */
+/**
+ * 站位行：汇总样带数、珊瑚记录数与平均白化指数。
+ * 普查组按巡次重访：评定口径取该站位「最近一次巡访」的样带，
+ * 不把几次重访混算；跨巡次总数仍在样带布设页分开查看。
+ */
 const rows = computed(() => {
   const sites = reefStore.sitesOfReef(reefId.value).filter((site) => {
     const keyword = reefStore.siteFilter.keyword.trim()
@@ -53,7 +59,15 @@ const rows = computed(() => {
     return true
   })
   return sites.map((site) => {
-    const belts = beltStore.beltsOfSite(site.id)
+    const allBelts = beltStore.beltsOfSite(site.id)
+    const latestVisit =
+      visitStore.visits.length === 0
+        ? null
+        : allBelts
+            .map((belt) => visitStore.getVisit(belt.visitId))
+            .filter((visit) => visit !== null)
+            .sort((a, b) => b!.year - a!.year || b!.quarter - a!.quarter)[0] ?? null
+    const belts = latestVisit ? allBelts.filter((belt) => belt.visitId === latestVisit.id) : allBelts
     const beltIds = new Set(belts.map((belt) => belt.id))
     const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId))
     const index = bleachIndex(corals)
@@ -62,6 +76,8 @@ const rows = computed(() => {
       beltCount: belts.length,
       beltLengthM: belts.reduce((sum, belt) => sum + belt.lengthM, 0),
       coralCount: corals.length,
+      latestVisitCode: latestVisit?.code ?? null,
+      visitTotal: new Set(allBelts.map((belt) => belt.visitId)).size,
       bleachIndex: index,
       grade: bleachGrade(index)
     }
@@ -291,11 +307,14 @@ onMounted(() => {
           </template>
         </el-table-column>
         <el-table-column prop="site.substrate" label="底质" width="120" />
-        <el-table-column label="样带" width="120" align="center">
+        <el-table-column label="样带（最近巡访）" width="160" align="center">
           <template #default="{ row }">
             <el-button text type="primary" size="small" @click="gotoBelts(row.site)">
               {{ row.beltCount }} 条 / {{ row.beltLengthM }} m
             </el-button>
+            <div class="gb-hint gb-mono">
+              {{ row.latestVisitCode ? `${row.latestVisitCode} · 共 ${row.visitTotal} 次巡访` : '暂无巡次' }}
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="珊瑚记录" width="110" align="right">

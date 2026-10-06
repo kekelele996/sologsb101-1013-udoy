@@ -11,6 +11,7 @@ import type { CountCategory, FishCount, SizeClass } from '@/types/fishCount'
 import type { Reef } from '@/types/reef'
 import type { Site } from '@/types/site'
 import type { Belt } from '@/types/belt'
+import type { Visit } from '@/types/visit'
 import { bleachGrade, bleachIndex, bleachedSharePct, coralCoveragePct, fishDensity, round } from '@/utils/bleach'
 
 /** 覆盖度汇总页筛选条件 */
@@ -20,6 +21,10 @@ export interface SurveyFilterState {
   bleachLevels: BleachLevel[]
   /** 是否只看白化指数高于阈值的样带 */
   onlyBleached: boolean
+  /** 普查原始视图：限定巡次（null = 全部巡次，各次分开列示） */
+  visitId: string | null
+  /** 普查原始视图：限定年份（按巡次年过滤） */
+  year: number | null
 }
 
 export function createEmptySurveyFilter(): SurveyFilterState {
@@ -27,7 +32,9 @@ export function createEmptySurveyFilter(): SurveyFilterState {
     keyword: '',
     reefIds: [],
     bleachLevels: [],
-    onlyBleached: false
+    onlyBleached: false,
+    visitId: null,
+    year: null
   }
 }
 
@@ -39,6 +46,9 @@ export interface CoverageSummaryRow {
   reefName: string
   siteId: string
   siteNo: string
+  visitId: string
+  visitCode: string
+  visitKind: Visit['kind']
   lengthM: number
   orientation: string
   surveyDate: string
@@ -61,6 +71,7 @@ export const useSurveyStore = defineStore('survey', () => {
   const reefs = ref<Reef[]>([])
   const sites = ref<Site[]>([])
   const belts = ref<Belt[]>([])
+  const visits = ref<Visit[]>([])
   const ready = ref(false)
   const error = ref<string | null>(null)
   const filter = ref<SurveyFilterState>(createEmptySurveyFilter())
@@ -102,6 +113,9 @@ export const useSurveyStore = defineStore('survey', () => {
     watchTable<Belt>(() => db.belts).subscribe((rows) => {
       belts.value = rows
     })
+    watchTable<Visit>(() => db.visits).subscribe((rows) => {
+      visits.value = rows
+    })
   }
 
   /** 某样带的珊瑚记录（按白化等级降序、覆盖长度降序） */
@@ -137,12 +151,19 @@ export const useSurveyStore = defineStore('survey', () => {
     return counts
   })
 
-  /** 覆盖度汇总行（全部样带） */
-  const coverageRows = computed<CoverageSummaryRow[]>(() =>
-    belts.value
+  /** 覆盖度汇总行（普查原始口径：各巡次样带分开列示，不跨巡次混算） */
+  const coverageRows = computed<CoverageSummaryRow[]>(() => {
+    const visitById = new Map(visits.value.map((visit) => [visit.id, visit]))
+    return belts.value
+      .filter((belt) => {
+        if (filter.value.visitId) return belt.visitId === filter.value.visitId
+        if (filter.value.year !== null) return visitById.get(belt.visitId)?.year === filter.value.year
+        return true
+      })
       .map((belt) => {
         const site = sites.value.find((item) => item.id === belt.siteId)
         const reef = site ? reefs.value.find((item) => item.id === site.reefId) : undefined
+        const visit = visitById.get(belt.visitId)
         const beltCorals = corals.value.filter((coral) => coral.beltId === belt.id)
         const beltFishes = fishes.value.filter((fish) => fish.beltId === belt.id)
         const coverCmTotal = round(
@@ -165,6 +186,9 @@ export const useSurveyStore = defineStore('survey', () => {
           reefName: reef?.name ?? '未知礁区',
           siteId: site?.id ?? '',
           siteNo: site?.no ?? '—',
+          visitId: belt.visitId,
+          visitCode: visit?.code ?? '未归档',
+          visitKind: visit?.kind ?? '常规',
           lengthM: belt.lengthM,
           orientation: belt.orientation,
           surveyDate: belt.surveyDate,
@@ -183,15 +207,19 @@ export const useSurveyStore = defineStore('survey', () => {
           fishDensity: fishDensity(fishTotal, belt.lengthM)
         }
       })
-      .sort((a, b) => b.bleachIndex - a.bleachIndex)
-  )
+      .sort((a, b) => {
+        const visitDiff = b.visitCode.localeCompare(a.visitCode, 'zh-Hans-CN')
+        if (visitDiff !== 0) return visitDiff
+        return b.bleachIndex - a.bleachIndex
+      })
+  })
 
   /** 按筛选条件过滤后的覆盖度行 */
   const filteredCoverageRows = computed<CoverageSummaryRow[]>(() =>
     coverageRows.value.filter((row) => {
       const keyword = filter.value.keyword.trim()
       if (keyword.length > 0) {
-        const haystack = `${row.reefName}${row.siteNo}${row.beltNo}${row.observer}`
+        const haystack = `${row.reefName}${row.siteNo}${row.beltNo}${row.observer}${row.visitCode}`
         if (!haystack.includes(keyword)) return false
       }
       if (filter.value.reefIds.length > 0 && !filter.value.reefIds.includes(row.reefId)) return false
@@ -378,6 +406,7 @@ export const useSurveyStore = defineStore('survey', () => {
     reefs,
     sites,
     belts,
+    visits,
     ready,
     error,
     filter,

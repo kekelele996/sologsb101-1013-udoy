@@ -16,6 +16,7 @@ import RouteMissingPanel from '@/components/common/RouteMissingPanel.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { useVisitStore } from '@/stores/visitStore'
 import {
   BLEACH_LEVELS,
   COMMON_GENERA,
@@ -31,11 +32,13 @@ const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
 const surveyStore = useSurveyStore()
+const visitStore = useVisitStore()
 
 const beltId = computed(() => String(route.params.id ?? ''))
 const belt = computed(() => beltStore.beltById(beltId.value))
 const site = computed(() => (belt.value ? reefStore.siteById(belt.value.siteId) : null))
 const reef = computed(() => (site.value ? reefStore.reefById(site.value.reefId) : null))
+const visit = computed(() => visitStore.getVisit(belt.value?.visitId))
 
 const dialogVisible = ref(false)
 const editingId = ref<string | null>(null)
@@ -266,6 +269,7 @@ onMounted(() => {
           </el-breadcrumb>
           <h2 class="page__title">
             样带 {{ belt.no }} · 底质与珊瑚分类计数
+            <el-tag size="small" type="success" effect="plain">{{ visit?.code ?? '未归档' }}{{ visit?.kind === '补登' ? '·补登' : '' }}</el-tag>
             <el-tag size="small" effect="plain">{{ belt.orientation }}向</el-tag>
             <el-tag size="small" type="info" effect="plain">长 {{ belt.lengthM }} m</el-tag>
             <el-tag size="small" type="info" effect="plain">{{ belt.surveyDate }}</el-tag>

@@ -4,7 +4,7 @@
  * 录长度/朝向/调查日期并回显已录记录数；朝向排序校验，深链访问时站位不存在给出友好空态。
  * 复用 <StatBadge>、<EmptyPanel>。
  */
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Edit, Plus, Right, Warning } from '@element-plus/icons-vue'
@@ -15,8 +15,11 @@ import RouteMissingPanel from '@/components/common/RouteMissingPanel.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { ORIENTATION_ORDER, useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { useVisitStore } from '@/stores/visitStore'
 import { BELT_LENGTH_PRESETS, ORIENTATIONS } from '@/types/belt'
 import type { Belt, Orientation } from '@/types/belt'
+import { QUARTERS, quarterLabel } from '@/types/visit'
+import type { Quarter } from '@/types/visit'
 import { bleachGrade, bleachIndex, coralCoveragePct, fishDensity } from '@/utils/bleach'
 import { initDatabase } from '@/utils/db'
 
@@ -25,10 +28,71 @@ const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
 const surveyStore = useSurveyStore()
+const visitStore = useVisitStore()
 
 const siteId = computed(() => String(route.params.id ?? ''))
 const site = computed(() => reefStore.siteById(siteId.value))
 const reef = computed(() => (site.value ? reefStore.reefById(site.value.reefId) : null))
+
+/**
+ * 当前正在录入的巡次：普查组每次重访各记各的样带，
+ * 同编号样带在不同巡次里分别成条，覆盖率/白化指数不跨巡次混算。
+ */
+const selectedVisitId = ref<string | null>(null)
+const visitDialogVisible = ref(false)
+const visitForm = reactive({
+  year: new Date().getFullYear(),
+  quarter: (Math.floor(new Date().getMonth() / 3) + 1) as Quarter,
+  startedOn: new Date().toISOString().slice(0, 10),
+  note: ''
+})
+
+/** 与本站位相关（有样带）或当季可选的巡次，按时间倒序 */
+const siteVisitIds = computed(() => new Set(beltStore.beltsOfSite(siteId.value).map((belt) => belt.visitId)))
+const visitOptions = computed(() =>
+  visitStore.sortedVisits.filter(
+    (visit) => siteVisitIds.value.has(visit.id) || visit.year === visitForm.year
+  )
+)
+const currentVisit = computed(() => visitStore.getVisit(selectedVisitId.value))
+
+/** 默认选中：URL ?visit= 指定，否则取本站位最近一次巡次 */
+function resolveDefaultVisit(): void {
+  const queryVisit = typeof route.query.visit === 'string' ? route.query.visit : null
+  if (queryVisit && visitStore.getVisit(queryVisit)) {
+    selectedVisitId.value = queryVisit
+    return
+  }
+  const siteBelts = beltStore.beltsOfSite(siteId.value)
+  if (siteBelts.length > 0) {
+    const latest = [...siteBelts].sort((a, b) => b.surveyDate.localeCompare(a.surveyDate))[0]
+    selectedVisitId.value = latest.visitId
+  } else {
+    selectedVisitId.value = visitStore.sortedVisits[0]?.id ?? null
+  }
+}
+
+function selectVisit(id: string): void {
+  selectedVisitId.value = id
+  beltStore.selectVisit(id)
+  void router.replace({ query: { ...route.query, visit: id } })
+}
+
+async function submitVisitForm(): Promise<void> {
+  try {
+    const created = await visitStore.createVisit({
+      year: visitForm.year,
+      quarter: visitForm.quarter,
+      startedOn: visitForm.startedOn,
+      note: visitForm.note
+    })
+    selectVisit(created.id)
+    ElMessage.success(`已开立 ${created.code} 巡次（${quarterLabel(created.quarter)}），该次重访的样带单独记录`)
+    visitDialogVisible.value = false
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '开立巡次失败')
+  }
+}
 
 const dialogVisible = ref(false)
 const editingId = ref<string | null>(null)
@@ -41,9 +105,9 @@ const form = reactive({
   observer: ''
 })
 
-/** 样带行：回显珊瑚记录数、鱼类记录数、覆盖率与白化指数 */
+/** 样带行：回显当前巡次的珊瑚记录数、鱼类记录数、覆盖率与白化指数 */
 const rows = computed(() =>
-  beltStore.beltsOfSite(siteId.value).map((belt) => {
+  beltStore.beltsOfSite(siteId.value, selectedVisitId.value).map((belt) => {
     const corals = surveyStore.coralsOfBelt(belt.id)
     const fishes = surveyStore.fishesOfBelt(belt.id)
     const coverCmTotal = corals.reduce((sum, coral) => sum + coral.coverCm, 0)
@@ -62,10 +126,10 @@ const rows = computed(() =>
   })
 )
 
-const conflicts = computed(() => beltStore.findBeltConflicts(siteId.value))
+const conflicts = computed(() => beltStore.findBeltConflicts(siteId.value, selectedVisitId.value))
 
 const stats = computed(() => {
-  const belts = beltStore.beltsOfSite(siteId.value)
+  const belts = beltStore.beltsOfSite(siteId.value, selectedVisitId.value)
   const totalLength = belts.reduce((sum, belt) => sum + belt.lengthM, 0)
   const coralCount = belts.reduce((sum, belt) => sum + surveyStore.coralsOfBelt(belt.id).length, 0)
   const fishCount = belts.reduce((sum, belt) => sum + surveyStore.fishesOfBelt(belt.id).length, 0)
@@ -74,13 +138,14 @@ const stats = computed(() => {
     totalLength,
     coralCount,
     fishCount,
-    orientationCount: new Set(belts.map((belt) => belt.orientation)).size
+    orientationCount: new Set(belts.map((belt) => belt.orientation)).size,
+    visitCount: beltStore.beltsOfSite(siteId.value).length === 0 ? 0 : new Set(beltStore.beltsOfSite(siteId.value).map((belt) => belt.visitId)).size
   }
 })
 
 function nextNo(): string {
   const numbers = beltStore
-    .beltsOfSite(siteId.value)
+    .beltsOfSite(siteId.value, selectedVisitId.value)
     .map((belt) => Number(belt.no.replace(/[^0-9]/g, '')))
     .filter((value) => Number.isFinite(value))
   const next = numbers.length === 0 ? 1 : Math.max(...numbers) + 1
@@ -89,11 +154,11 @@ function nextNo(): string {
 
 function openCreate(): void {
   editingId.value = null
-  const existing = beltStore.beltsOfSite(siteId.value)
+  const existing = beltStore.beltsOfSite(siteId.value, selectedVisitId.value)
   form.no = nextNo()
   form.lengthM = existing[0]?.lengthM ?? 50
   form.orientation = ORIENTATIONS[existing.length % ORIENTATIONS.length]
-  form.surveyDate = new Date().toISOString().slice(0, 10)
+  form.surveyDate = currentVisit.value?.startedOn || new Date().toISOString().slice(0, 10)
   form.observer = existing[0]?.observer ?? ''
   dialogVisible.value = true
 }
@@ -109,6 +174,10 @@ function openEdit(belt: Belt): void {
 }
 
 async function submitForm(): Promise<void> {
+  if (!selectedVisitId.value) {
+    ElMessage.warning('请先选择或开立本次重访的巡次')
+    return
+  }
   if (!form.no.trim()) {
     ElMessage.warning('请填写样带编号')
     return
@@ -122,10 +191,10 @@ async function submitForm(): Promise<void> {
     return
   }
   const duplicated = beltStore
-    .beltsOfSite(siteId.value)
+    .beltsOfSite(siteId.value, selectedVisitId.value)
     .some((belt) => belt.no === form.no.trim() && belt.orientation === form.orientation && belt.id !== editingId.value)
   if (duplicated) {
-    ElMessage.warning(`同一朝向（${form.orientation}）下样带编号「${form.no.trim()}」已存在`)
+    ElMessage.warning(`该巡次同一朝向（${form.orientation}）下样带编号「${form.no.trim()}」已存在（其他巡次的同编号不算重复）`)
     return
   }
   submitting.value = true
@@ -141,9 +210,11 @@ async function submitForm(): Promise<void> {
       await beltStore.updateBelt(editingId.value, payload)
       ElMessage.success('样带已更新')
     } else {
-      const created = await beltStore.createBelt(siteId.value, payload)
+      const created = await beltStore.createBelt(siteId.value, selectedVisitId.value, payload)
       beltStore.selectBelt(created.id)
-      ElMessage.success(`样带 ${created.no}（${created.orientation}向 ${created.lengthM} m）已布设，可录入底质与珊瑚计数`)
+      ElMessage.success(
+        `${currentVisit.value?.code ?? '本次'}巡访样带 ${created.no}（${created.orientation}向 ${created.lengthM} m）已布设，可录入底质与珊瑚计数`
+      )
     }
     dialogVisible.value = false
   } finally {
@@ -193,7 +264,18 @@ function gotoFishes(belt: Belt): void {
 onMounted(() => {
   if (reefStore.reefs.length === 0) void initDatabase()
   if (site.value) reefStore.selectSite(site.value.id)
+  resolveDefaultVisit()
+  if (selectedVisitId.value) beltStore.selectVisit(selectedVisitId.value)
 })
+
+// 巡次表异步载入：列表到齐后若还没选中巡次，补一次默认值
+watch(
+  () => visitStore.visits,
+  () => {
+    if (!selectedVisitId.value) resolveDefaultVisit()
+    if (selectedVisitId.value) beltStore.selectVisit(selectedVisitId.value)
+  }
+)
 </script>
 
 <template>
@@ -231,14 +313,40 @@ onMounted(() => {
             <el-tag size="small" type="info" effect="plain">{{ site.substrate }}</el-tag>
           </h2>
           <p class="gb-hint">
-            布设样带后录入长度、朝向与调查日期；同朝向内样带编号不可重复，列表按北 → 东 → 南 → 西排序。
+            普查组按巡次记每次重访：同编号样带在不同巡次里各成一条，覆盖率与白化指数各次分开算、不混算。
+            同朝向内样带编号仅在同一巡次内不可重复，列表按北 → 东 → 南 → 西排序。
           </p>
         </div>
         <div class="page__actions">
           <el-button :icon="Warning" @click="applyOrientationOrder">朝向排序校验</el-button>
-          <el-button type="primary" :icon="Plus" @click="openCreate">新增样带</el-button>
+          <el-button :icon="Plus" @click="visitDialogVisible = true">开立本次巡次</el-button>
+          <el-button type="primary" :icon="Plus" :disabled="!selectedVisitId" @click="openCreate">新增样带</el-button>
         </div>
       </div>
+
+      <el-card shadow="never" class="gb-panel visit-bar">
+        <div class="visit-bar__row">
+          <span class="visit-bar__label">当前巡访（普查组）：</span>
+          <el-radio-group :model-value="selectedVisitId" @update:model-value="(value: string) => selectVisit(value)">
+            <el-radio-button v-for="visit in visitOptions" :key="visit.id" :value="visit.id">
+              {{ visit.code }}
+              <el-tag v-if="visit.kind === '补登'" size="small" type="warning" effect="plain">补登</el-tag>
+            </el-radio-button>
+          </el-radio-group>
+          <el-button text type="primary" size="small" :icon="Plus" @click="visitDialogVisible = true">新巡次</el-button>
+        </div>
+        <p v-if="currentVisit" class="gb-hint">
+          {{ currentVisit.code }} · {{ quarterLabel(currentVisit.quarter) }} · 开始 {{ currentVisit.startedOn || '—' }}
+          {{ currentVisit.note ? `· ${currentVisit.note}` : '' }}
+        </p>
+        <el-alert
+          v-if="currentVisit?.kind === '补登'"
+          type="warning"
+          :closable="false"
+          show-icon
+          title="这是补登巡次：其下样带无法归入季度定案编号，档案室对账时会单列，不参与评定与导出。"
+        />
+      </el-card>
 
       <div class="gb-stats-row">
         <StatBadge label="样带条数" :value="stats.beltCount" suffix="条" icon="Files" />
@@ -257,10 +365,14 @@ onMounted(() => {
 
       <EmptyPanel
         v-if="rows.length === 0"
-        title="该站位还没有样带"
-        description="新增第一条样带并录入长度与朝向，随后即可录入底质、珊瑚分类覆盖与鱼类计数。"
-        action-text="新增样带"
-        @action="openCreate"
+        :title="selectedVisitId ? `该站位在 ${currentVisit?.code ?? '当前巡次'} 还没有样带` : '请先选择或开立本次巡次'"
+        :description="
+          selectedVisitId
+            ? '在本次重访下新增第一条样带并录入长度与朝向，随后即可录入底质、珊瑚分类覆盖与鱼类计数；其他巡次的同编号样带不受影响。'
+            : '普查组每次重访开立一条巡次，样带按巡次分开记录。先开立本次巡次，再布设样带。'
+        "
+        :action-text="selectedVisitId ? '新增样带' : '开立本次巡次'"
+        @action="selectedVisitId ? openCreate() : (visitDialogVisible = true)"
       />
 
       <el-table v-else :data="rows" border stripe class="gb-table-compact">
@@ -361,6 +473,32 @@ onMounted(() => {
         </el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="visitDialogVisible" title="开立本次重访巡次" width="520px" :close-on-click-modal="false">
+      <el-form label-width="96px">
+        <el-form-item label="年份" required>
+          <el-input-number v-model="visitForm.year" :min="2000" :max="2100" :step="1" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="季度" required>
+          <el-radio-group v-model="visitForm.quarter">
+            <el-radio-button v-for="quarter in QUARTERS" :key="quarter" :value="quarter">
+              Q{{ quarter }}（{{ quarterLabel(quarter) }}）
+            </el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="开始日期">
+          <el-date-picker v-model="visitForm.startedOn" type="date" value-format="YYYY-MM-DD" placeholder="选择巡访日期" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="visitForm.note" type="textarea" :rows="2" maxlength="80" show-word-limit placeholder="天气、潮汐、重访说明等" />
+        </el-form-item>
+      </el-form>
+      <p class="gb-hint">同一年同一季度只保留一条巡次；开立后本次重访的样带、珊瑚记录与鱼类计数都记在该巡次下。</p>
+      <template #footer>
+        <el-button @click="visitDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitVisitForm">开立并选为当前巡次</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
@@ -406,5 +544,24 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 2px;
   margin-top: 4px;
+}
+
+.visit-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.visit-bar__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.visit-bar__label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #0b5d5a;
 }
 </style>
